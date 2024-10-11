@@ -3,7 +3,7 @@ name: Deploy to Google Cloud VM
 on:
   push:
     branches:
-      - main  # or replace with your working branch
+      - main
 
 jobs:
   deploy:
@@ -11,24 +11,63 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     - name: Set up SSH
-      uses: webfactory/ssh-agent@v0.5.3
+      uses: webfactory/ssh-agent@v0.7.0
       with:
         ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
     - name: Install Node.js
-      uses: actions/setup-node@v2
+      uses: actions/setup-node@v3
       with:
-        node-version: '16'  # or the Node version you're using
+        node-version: '18'
+
+    - name: Cache Node modules
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.OS }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.OS }}-node-
 
     - name: SSH and Deploy
+      env:
+        HOST: ${{ secrets.SERVER_HOST }}
+        USER: ${{ secrets.SERVER_USER }}
       run: |
-        ssh -o StrictHostKeyChecking=no your-username@your-server-ip << 'EOF'
-          cd /var/www/freshcredit  # Navigate to your app's directory
-          git pull origin main      # Pull the latest code
-          npm install               # Install dependencies
-          npm run build             # Build the app (if necessary)
-          pm2 restart freshcredit-app  # Restart your app with PM2
+        ssh -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
+          cd /var/www/freshcredit
+          git pull origin main
+          npm ci
+          npm run build
+          
+          # Copy environment variables
+          cp /path/to/production/.env .env
+          
+          # Restart the application
+          pm2 restart freshcredit-app
+
+          # Health check
+          if curl -f http://localhost:3000/api/health; then
+            echo "Deployment successful"
+          else
+            echo "Deployment failed"
+            git reset --hard HEAD@{1}
+            npm ci
+            npm run build
+            pm2 restart freshcredit-app
+            exit 1
+          fi
         EOF
+
+    - name: Create Sentry release
+      env:
+        SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+      run: |
+        npm install @sentry/cli
+        npx sentry-cli releases new ${{ github.sha }}
+        npx sentry-cli releases set-commits ${{ github.sha }} --auto
+        npx sentry-cli releases finalize ${{ github.sha }}
